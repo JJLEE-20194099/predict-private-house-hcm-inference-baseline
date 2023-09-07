@@ -1,0 +1,14 @@
+fastapi
+requests
+uvicorn
+python-multipart
+lightgbm
+tqdm
+gensim
+pyvi
+regex
+asyncio
+pandas
+numpy
+python-dotenv
+pyforest
