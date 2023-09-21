@@ -1,15 +1,30 @@
 import os
 import json
+from fastapi import FastAPI
 from fastapi import HTTPException, File, UploadFile
+from dataclasses import astuple
 from fastapi.responses import FileResponse
+import requests
 from tqdm import tqdm
+from pydantic import BaseModel
 import csv
 import pandas as pd
 from dataclasses import dataclass
 import numpy as np
 import lightgbm as lgb
+import math
+from typing import Union, List, Optional
 import regex as re
 from datetime import datetime
+
+Num = Union[int, float]
+class Distance:
+    RADIUS = 6371
+    MULTIPLE_TRANSFORM_COEFF = 10 / 1000
+    DISTANCE_THRESHOLD = 10000
+
+
+app = FastAPI()
 
 @dataclass
 class LocationConfig:
@@ -210,7 +225,7 @@ async def count_facilities(lat: float, lon: float, distance: int, response = Non
             distance = distance
         ))
     facility_dict = {}
-    means_of_facility_obj = json.load(open('/kaggle/input/facility/means_of_facility.json', encoding='utf-8'))
+    means_of_facility_obj = json.load(open('./app/files/json/means_of_facility.json', encoding='utf-8'))
     means_of_facility = means_of_facility_obj["means_of_facility_list"]
     for _fa in means_of_facility:
         facility_dict[_fa] = 0
@@ -228,6 +243,71 @@ async def count_facilities(lat: float, lon: float, distance: int, response = Non
 
     return facility_dict
 
+
+def distance_func(lat1: float, lon1: float, lat2: float, lon2: float):
+
+    try:
+        R = Distance.RADIUS
+        dLat = (lat2-lat1) * math.pi / 180
+        dLon = (lon2-lon1) * math.pi / 180
+        lat1 = lat1 * math.pi / 180
+        lat2 = lat2 * math.pi / 180
+        a = math.sin(dLat/2) * math.sin(dLat/2) + math.sin(dLon/2) * \
+            math.sin(dLon/2) * math.cos(lat1) * math.cos(lat2)
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+        d = R * c
+        return d*1000
+    except: # pylint: disable=bare-except
+        print(f"Distance_Func error with: {(lat1, lon1, lat2, lon2)}")
+
+
+def cal_distance(lat1_list: List[Num], lon1_list: List[Num], lat2_list: List[Num], lon2_list: List[Num]):
+    try:
+        all_res = []
+        for i, lat2 in enumerate(lat2_list):
+            lon2 = lon2_list[i]
+            each_location_res = []
+            for j, lat1 in enumerate(lat1_list):
+                lon1 = lon1_list[j]
+                each_location_res.append(distance_func(lat1, lon1, lat2, lon2))
+            all_res.append(each_location_res)
+
+        return all_res
+    except: # pylint: disable=bare-except
+        print(
+            f"cal_distance error with: {(lat1_list, lon1_list, lat2_list, lon2_list)}")
+
+
+def far_or_not(x: float, distance: float):
+    try:
+        if x > distance:
+            return distance * Distance.MULTIPLE_TRANSFORM_COEFF
+        return x / distance
+    except: # pylint: disable=bare-except
+        print(f"far_or_not with: {(x, distance)}")
+
+
+def far_or_not_by_list(distance_input_arr, distance):
+    try:
+        all_res = []
+        for instance in distance_input_arr:
+            each_res = []
+            for dis_candidate in instance:
+                each_res.append(far_or_not(dis_candidate, distance))
+            all_res.append(each_res)
+        return all_res
+    except: # pylint: disable=bare-except
+        print(f"far_or_not_by_list with: {(distance_input_arr, distance)}")
+
+
+def preprocess_distance(distance):
+    if distance > Distance.MULTIPLE_TRANSFORM_COEFF:
+        return np.nan
+    return distance
+def format_distance(distance, threshold=2000):
+    if distance <= threshold:
+        return distance / threshold
+    return -1
 
 def cal_distance_to_type_of_place(location_df:pd.DataFrame, place_information_config: PlaceInformationConfig):
 
@@ -256,6 +336,12 @@ def cal_distance_to_type_of_place(location_df:pd.DataFrame, place_information_co
             x['lat'], x['lon'], commercial_lat, commercial_lon), axis=1)
 
     return location_df
+
+
+
+
+def calculate_distance_to_district_center(street_lat, street_lon, district_lat, district_lon):
+    return distance_func(street_lat, street_lon, district_lat, district_lon)
 
 trained_cols = ['num_of_floor',
  'park_2',
@@ -361,10 +447,10 @@ lgbm_regressor = lgb.Booster(model_file='./app/files/base_model/lgbm/lgbr_base.t
 # prediced_price = np.exp(load_lgbm_regressor.predict(merge_df[trained_cols]))
 # print(prediced_price, f"Min: {prediced_price * 0.8} - Max: {prediced_price * 1.2}")
 
-district_dict = json.load(open('./app/files/json/dict/district.json', 'r'))
-street_str_to_num_dict = json.load(open('./app/files/json/dict/street_str_to_num_dict.json', 'r'))
-ward_str_to_num_dict = json.load(open('./app/files/json/dict/ward_str_to_num_dict.json', 'r'))
-predicted_value_bias_by_district_dict = json.load(open('./app/files/json/dict/predicted_value_bias_by_district.json', 'r'))
+district_dict = json.load(open('./app/files/json/dict/district.json', 'r', encoding="utf8"))
+street_str_to_num_dict = json.load(open('./app/files/json/dict/street_str_to_num_dict.json', 'r', encoding="utf8"))
+ward_str_to_num_dict = json.load(open('./app/files/json/dict/ward_str_to_num_dict.json', 'r', encoding="utf8"))
+predicted_value_bias_by_district_dict = json.load(open('./app/files/json/dict/predicted_value_bias_by_district.json', 'r', encoding="utf8"))
 
 population_df = pd.read_csv('./app/files/table/hcm_population.csv')
 population_df['name'] = population_df['name'].str.strip().tolist()
@@ -377,9 +463,11 @@ means_of_facility_obj = json.load(open('./app/files/json/means_of_facility.json'
 means_of_facility = means_of_facility_obj["means_of_facility_list"]
 distance = 2000
 
+population_sum = population_df['population'].sum()
+
 
 street_house_config = {
-    "alley_width": np.nan,
+    "alley_width": [np.nan],
     "is_nha_mt": 1,
     # hợp đồng hợp lệ
     "juridical": 3,
@@ -387,7 +475,7 @@ street_house_config = {
 }
 
 alley_width_smaller_than_3_config = {
-    "alley_width": range(20, 30) / 10,
+    "alley_width": [i / 10 for i in range(20, 30)],
     "is_nha_mt": 3,
     # hợp đồng hợp lệ
     "juridical": 3,
@@ -395,7 +483,7 @@ alley_width_smaller_than_3_config = {
 }
 
 alley_width_3_and_6_config = {
-    "alley_width": range(30, 60) / 10,
+    "alley_width": [i / 10 for i in range(30, 60)],
     "is_nha_mt": 3,
     # hợp đồng hợp lệ
     "juridical": 3,
@@ -403,7 +491,7 @@ alley_width_3_and_6_config = {
 }
 
 alley_width_greater_than_10_config = {
-    "alley_width": range(61, 100) / 10,
+    "alley_width": [i / 10 for i in range(60, 100)],
     "is_nha_mt": 3,
     # hợp đồng hợp lệ
     "juridical": 3,
@@ -411,6 +499,7 @@ alley_width_greater_than_10_config = {
 }
 
 type_of_config_list = [street_house_config, alley_width_greater_than_10_config, alley_width_3_and_6_config, alley_width_smaller_than_3_config]
+initial_cols = [c for c in trained_cols if c not in ['juridical', 'alley_width', 'is_nha_mt']]
 
 
 @app.get("//healthcheck")
@@ -420,10 +509,31 @@ def healthcheck():
         "data": "200"
     }
 
+class GeolocationModel(BaseModel):
+    latitude: float
+    longitude: float
+
+
+class RealEstateData(BaseModel):
+    landSize: float
+    city: str
+    district: str
+    ward: str
+    prefixDistrict: str
+    street: str
+    country: str
+    addressDetails: Optional[str]
+    numberOfFloors: Optional[float]
+    numberOfBathRooms: Optional[float]
+    numberOfBedRooms: Optional[float]
+    houseDirection: Optional[str]
+    accessibility: Optional[str]
+    frontWidth: Optional[float]
+    geolocation: GeolocationModel
+    extract_geolocation: GeolocationModel
 
 @app.post("//predict-private-house-v1")
 async def predict_price(body: RealEstateData):
-
     data = dict(body)
 
     for key in ["district", "ward", "street", "prefixDistrict"]:
@@ -443,14 +553,15 @@ async def predict_price(body: RealEstateData):
     data["num_of_ward"] = population_info['num_of_ward'].tolist()[0]
 
     facility_df = pd.DataFrame(columns = ['lat', 'lon'])
-    facility_df['lat'] = [data["geolocation"]["latitude"]]
-    facility_df['lon'] = [data["geolocation"]["longitude"]]
+    facility_df['lat'] = [dict(data["geolocation"])["latitude"]]
+    facility_df['lon'] = [dict(data["geolocation"])["longitude"]]
 
-    num_of_facility = await count_facilities(sample_data["geolocation"]["latitude"], sample_data["geolocation"]["longitude"], distance)
+    num_of_facility = await count_facilities(dict(data["geolocation"])["latitude"], dict(data["geolocation"])["longitude"], distance)
 
     for facility in means_of_facility:
-        sample_data[facility] = num_of_facility[facility]
+        data[facility] = num_of_facility[facility]
         facility_df[facility] = num_of_facility[facility]
+
 
     merge_df = cal_distance_to_type_of_place(facility_df, PlaceInformationConfig(
         park_df = park_df,
@@ -459,13 +570,17 @@ async def predict_price(body: RealEstateData):
     ))
 
 
+
     for c in distance_cols:
         merge_df[c] = merge_df[c].apply(format_distance)
 
     del data['geolocation']
     del data['extract_geolocation']
     for key in list(data.keys()):
-        merge_df[key] = [data[key]]
+        if data[key] == -1:
+            merge_df[key] = [np.nan]
+        else:
+            merge_df[key] = [data[key]]
     merge_df['area_ratio'] = merge_df['landSize'] / (merge_df['acreage'] * 1000 * 1000) * 100
     merge_df['distance_point_and_center'] = merge_df.apply(lambda x: calculate_distance_to_district_center(x['lat'], x['lon'], x['district_lat'], x['district_lon']), axis=1)
     merge_df['distance_point_and_center'] = merge_df.apply(lambda x: format_distance(x['distance_point_and_center'], 5000), axis=1)
@@ -490,23 +605,31 @@ async def predict_price(body: RealEstateData):
 
     merge_df['administrative_genre'] = merge_df['administrative_genre'].apply(mapping_administrative_genre)
 
+
     bias_level = predicted_value_bias_by_district_dict[str(merge_df['district_num'].tolist()[0])]
 
     stats_list = []
     for config in type_of_config_list:
-        X = merge_df.copy()[trained_cols]
+
+        X = merge_df.copy()[initial_cols]
         for key in list(config.keys()):
             X[key] = [config[key]]
-
         alley_width_list = config['alley_width']
         s = 0
         for alley_width in alley_width_list:
-            X["alley_width"] = alley_width
-            predicted_price = np.exp(lgbm_regressor.predict(X))
+
+            X["alley_width"] = [alley_width]
+            X = X[trained_cols]
+            predicted_price = np.exp(lgbm_regressor.predict(X))[0]
+            # print()
+            # print(X)
+            # print(predicted_price)
+            # print()
             s += predicted_price
+
+        
+
         s = s / len(alley_width_list)
-
-
 
         stats = {
                 "min": s - s * bias_level / 100,
@@ -514,7 +637,6 @@ async def predict_price(body: RealEstateData):
                 "mean": s
             }
         stats_list.append(stats)
-
 
     return {
         "data": {
